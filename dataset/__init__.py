@@ -6,3 +6,4 @@ from dataset.duke import DUKEDataset
 from dataset.lidc import LIDCDataset
 from dataset.default import DEFAULTDataset
 from dataset.bids import BIDSDataset
+from dataset.cp import CPDataset

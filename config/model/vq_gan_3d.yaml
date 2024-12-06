@@ -3,8 +3,9 @@ batch_size: 30
 num_workers: 30
 
 gpus: 1
+gpu_index: 2
 accumulate_grad_batches: 1
-default_root_dir: ???
+default_root_dir: /home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly/checkpoints/vq_gan/
 default_root_dir_postfix: ''
 resume_from_checkpoint:
 max_steps: -1

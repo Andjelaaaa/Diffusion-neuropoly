@@ -136,6 +136,7 @@ debug/
 __pycache__/
 **/__pycache__/
 lightning_logs/
+evaluation/generated_results/
 .ipynb_checkpoints/
 *.mp4
 *.egg-info

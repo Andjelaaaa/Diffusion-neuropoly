@@ -1,4 +1,4 @@
-from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, DEFAULTDataset, BIDSDataset
+from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, DEFAULTDataset, BIDSDataset, CPDataset
 from torch.utils.data import WeightedRandomSampler
 
 
@@ -51,6 +51,13 @@ def get_dataset(cfg):
             root_dir=cfg.dataset.root_dir, is_VQGAN=cfg.dataset.is_VQGAN, contrasts=cfg.dataset.contrasts, derivatives=cfg.dataset.derivatives, mandatory_derivatives=cfg.dataset.mandatory_derivatives)
         val_dataset = BIDSDataset(
             root_dir=cfg.dataset.root_dir, is_VQGAN=cfg.dataset.is_VQGAN, contrasts=cfg.dataset.contrasts, derivatives=cfg.dataset.derivatives, mandatory_derivatives=cfg.dataset.mandatory_derivatives)
+        sampler = None
+        return train_dataset, val_dataset, sampler
+    if cfg.dataset.name == 'CP':
+        train_dataset = CPDataset(
+            tsv_path=cfg.dataset.tsv_path)
+        val_dataset = CPDataset(
+            tsv_path=cfg.dataset.tsv_path)
         sampler = None
         return train_dataset, val_dataset, sampler
     raise ValueError(f'{cfg.dataset.name} Dataset is not available')
