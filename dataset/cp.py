@@ -45,7 +45,7 @@ class CPDataset(Dataset):
         self.augmentation = augmentation
         self.sp_size = sp_size
         self.d_size = d_size
-        self.file_paths = self.get_data_files()
+        self.file_paths, self.scan_ids, self.sub_ids = self.get_data_files()
 
         print(f"Found {len(self.file_paths)} files in {self.tsv_path}")
 
@@ -59,26 +59,31 @@ class CPDataset(Dataset):
             if col not in participants.columns:
                 raise ValueError(f"Missing required column: {col}")
         
-        unique_subjects = participants["sub_id_bids"].unique()
-        train_subjects, _ = train_test_split(unique_subjects, test_size=0.2, random_state=42)
+        # unique_subjects = participants["sub_id_bids"].unique()
+        # train_subjects, _ = train_test_split(unique_subjects, test_size=0.2, random_state=42)
 
         data_files = []
+        scan_ids = []
+        sub_ids = []
         base_path = os.path.dirname(self.tsv_path)
         for _, row in participants.iterrows():
-            if row["sub_id_bids"] in train_subjects:
-                file_path = os.path.join(
-                    base_path,
-                    f"work_dir2/cbf2mni_wdir/{row['participant_id']}/{row['scan_id']}/wf/brainextraction/*_dtype.nii.gz"
-                )
-                matched_files = glob.glob(file_path)
-                if len(matched_files) == 1:
-                    data_files.append(matched_files[0])
-                elif len(matched_files) > 1:
-                    raise ValueError(f"Multiple files match pattern: {file_path}")
-                else:
-                    raise FileNotFoundError(f"No files found for: {file_path}")
+            # if row["sub_id_bids"] in train_subjects:
+            file_path = os.path.join(
+                base_path,
+                f"work_dir2/cbf2mni_wdir/{row['participant_id']}/{row['scan_id']}/wf/brainextraction/*_dtype.nii.gz"
+            )
+            matched_files = glob.glob(file_path)
+            
+            if len(matched_files) == 1:
+                data_files.append(matched_files[0])
+                scan_ids.append(row['scan_id'])
+                sub_ids.append(row['sub_id_bids'])
+            elif len(matched_files) > 1:
+                raise ValueError(f"Multiple files match pattern: {file_path}")
+            else:
+                raise FileNotFoundError(f"No files found for: {file_path}")
 
-        return data_files
+        return data_files, scan_ids, sub_ids
 
     def roi_crop(self, image):
         """
@@ -110,6 +115,8 @@ class CPDataset(Dataset):
         """
         # Load image
         image_path = self.file_paths[index]
+        scan_id = self.scan_ids[index]
+        sub_id = self.sub_ids[index]
         img = nib.load(image_path)
         # print(img.shape)
         img = np.swapaxes(img.get_data(), 0, 2)
@@ -143,7 +150,9 @@ class CPDataset(Dataset):
         imageout = torch.from_numpy(img).float().view(1, self.d_size, self.sp_size, self.sp_size)
         # imageout = imageout * 2 - 1
 
-        return {'data': imageout}
+        return {'data': imageout,
+                'scan_id': scan_id,
+                'sub_id': sub_id}
 # def threshold_at_zero(x):
 #     """
 #     Custom threshold function for CropForeground.

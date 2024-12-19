@@ -1,8 +1,10 @@
 from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, DEFAULTDataset, BIDSDataset, CPDataset
 from torch.utils.data import WeightedRandomSampler
+from sklearn.model_selection import GroupKFold
+import torch
 
 
-def get_dataset(cfg):
+def get_dataset(cfg, fold_idx=None, num_folds=5):
     if cfg.dataset.name == 'MRNet':
         train_dataset = MRNetDataset(
             root_dir=cfg.dataset.root_dir, task=cfg.dataset.task, plane=cfg.dataset.plane, split='train')
@@ -54,10 +56,21 @@ def get_dataset(cfg):
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'CP':
-        train_dataset = CPDataset(
-            tsv_path=cfg.dataset.tsv_path)
-        val_dataset = CPDataset(
-            tsv_path=cfg.dataset.tsv_path)
-        sampler = None
+        dataset = CPDataset(tsv_path=cfg.dataset.tsv_path)
+    # Perform cross-validation splits
+    if fold_idx is not None:
+        # Extract the scan IDs (or subject IDs)
+        sub_ids = dataset.sub_ids  # Ensure this corresponds to subject IDs
+        assert len(sub_ids) == len(dataset), "Mismatch between subject IDs and dataset length"
+        # Create GroupKFold object
+        gkf = GroupKFold(n_splits=num_folds)
+        
+        # Split the dataset by groups
+        indices = list(range(len(dataset)))
+        train_indices, val_indices = list(gkf.split(indices, groups=sub_ids))[fold_idx]
+        
+        train_dataset = torch.utils.data.Subset(dataset, train_indices)
+        val_dataset = torch.utils.data.Subset(dataset, val_indices)
+        sampler = None  # Adjust sampler if required
         return train_dataset, val_dataset, sampler
     raise ValueError(f'{cfg.dataset.name} Dataset is not available')
