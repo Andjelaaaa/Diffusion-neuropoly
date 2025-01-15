@@ -104,7 +104,7 @@ class CPDataset(Dataset):
         padded_crop = np.transpose(padded_crop, (1, 2, 3, 0))  # Rearrange axes
         # print( padded_crop.shape)
 
-        return padded_crop
+        return padded_crop, (x0, x1, y0, y1, z0, z1)
 
     def __len__(self):
         return len(self.file_paths)
@@ -118,8 +118,9 @@ class CPDataset(Dataset):
         scan_id = self.scan_ids[index]
         sub_id = self.sub_ids[index]
         img = nib.load(image_path)
-        # print(img.shape)
-        img = np.swapaxes(img.get_data(), 0, 2)
+        affine = img.affine
+        
+        img = np.swapaxes(img.get_fdata(), 0, 2)
         # print(img.shape)
         img = np.flip(img, 1)
         # print(img.shape)
@@ -127,32 +128,59 @@ class CPDataset(Dataset):
         # print(img.shape)
 
         # Apply ROI cropping
-        img = self.roi_crop(image=img)
+        # img = self.roi_crop(image=img)
+        cropped_img, bbox = self.roi_crop(img)
 
         # Resize to uniform spatial size
-        img = resize(img, (self.d_size, self.sp_size, self.sp_size), mode='constant')
+        # img = resize(img, (self.d_size, self.sp_size, self.sp_size), mode='constant')
+        resized_img = resize(cropped_img, (self.d_size, self.sp_size, self.sp_size), mode='constant')
+        # resized_img = resize(img, (self.d_size, self.sp_size, self.sp_size), mode='constant')
+        # img = img.get_fdata()
+        # resized_img = img
+
+        # Update affine for resized image
+        x0, x1, y0, y1, z0, z1 = bbox
+        scale_factors = np.array([
+            (x1 - x0) / self.d_size,
+            (y1 - y0) / self.sp_size,
+            (z1 - z0) / self.sp_size
+        ])
+        updated_affine = affine.copy()
+        updated_affine[:3, :3] *= scale_factors[:, None]  # Adjust scaling
+        updated_affine[:3, 3] += [x0, y0, z0]  # Adjust translation
+        # updated_affine = 1
 
         # Apply data augmentation
         if self.augmentation:
+            print('AUGMENTATION')
             random_n = torch.rand(1)
             random_i = 0.3 * torch.rand(1)[0] + 0.7
             if random_n[0] > 0.5:
                 img = np.flip(img, 0)  # Random flip along the x-axis
             img = img * random_i.data.cpu().numpy()  # Random intensity scaling
-        # Find min and max intensity for normalization
-        a_min = img.min()
-        a_max = img.max()
+            
+        # Normalize to [-1, 1]
+        a_min, a_max = resized_img.min(), resized_img.max()
+        normalized_img = (resized_img - a_min) / (a_max - a_min) * 2 - 1
+        # print('NORMALIZED:', normalized_img.shape)
 
-        # Normalize to [-1, 1]
-        img = (img - a_min) / (a_max - a_min)  # Normalize to [0, 1]
-        img = img * 2 - 1                      # Rescale to [-1, 1]
-        # Normalize to [-1, 1]
-        imageout = torch.from_numpy(img).float().view(1, self.d_size, self.sp_size, self.sp_size)
-        # imageout = imageout * 2 - 1
+        # Reorder axes from (512, 512, 210) to (210, 512, 512)
+        # reordered_img = np.transpose(normalized_img, (2, 0, 1))  # Move axis 2 to the front
+        # print('REORDERED:', reordered_img.shape)
+
+        # Convert to PyTorch tensor and add batch dimension
+        # imageout = torch.from_numpy(reordered_img).float().unsqueeze(0) 
+        # print('IMAGEOUT:', imageout.shape)
+        # imageout = torch.from_numpy(normalized_img).float().view(1, 210, 512, 512)
+        imageout = torch.from_numpy(normalized_img).float().view(1, self.d_size, self.sp_size, self.sp_size)
+
 
         return {'data': imageout,
                 'scan_id': scan_id,
-                'sub_id': sub_id}
+                'sub_id': sub_id,
+                'affine': affine,
+                'upt_affine': updated_affine}
+    
 # def threshold_at_zero(x):
 #     """
 #     Custom threshold function for CropForeground.

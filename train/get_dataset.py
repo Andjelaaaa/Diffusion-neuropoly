@@ -4,7 +4,7 @@ from sklearn.model_selection import GroupKFold
 import torch
 
 
-def get_dataset(cfg, fold_idx=None, num_folds=5):
+def get_dataset(cfg, fold_idx=None, num_folds=5, d_size=64):
     if cfg.dataset.name == 'MRNet':
         train_dataset = MRNetDataset(
             root_dir=cfg.dataset.root_dir, task=cfg.dataset.task, plane=cfg.dataset.plane, split='train')
@@ -56,7 +56,7 @@ def get_dataset(cfg, fold_idx=None, num_folds=5):
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'CP':
-        dataset = CPDataset(tsv_path=cfg.dataset.tsv_path)
+        dataset = CPDataset(tsv_path=cfg.dataset.tsv_path, d_size=d_size)
     # Perform cross-validation splits
     if fold_idx is not None:
         # Extract the scan IDs (or subject IDs)

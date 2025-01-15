@@ -1,14 +1,17 @@
 
 import os
-GPU_ID = 3 
+GPU_ID = 2 
 os.environ["CUDA_VISIBLE_DEVICES"]=f"{GPU_ID}"
 device = f'cuda:0'
 import sys
 from re import I
 import re
+import csv
 sys.path.append('../')
 import importlib
 import datetime
+import torch
+import torch.nn.functional as F
 
 # Add the root directory of the project to sys.path
 project_root = os.path.abspath("/home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly")
@@ -65,17 +68,48 @@ def find_best_ckpt(base_folder):
         else:
             print("No valid checkpoints found.")
 
-def save_reconstructions(save_path, vqgan, val_dataset):
+def calculate_and_store_recon_loss(csv_path, sub_id, scan_id, x_recon, x, l1_weight):
     """
-    Save the reconstructions from the VQGAN model for the validation set.
+    Calculate the reconstruction loss and store it in a CSV file.
+
+    Args:
+        csv_path (str): Path to the CSV file where results will be stored.
+        sub_id (str): Subject ID.
+        scan_id (str): Scan ID.
+        x_recon (torch.Tensor): Reconstructed data.
+        x (torch.Tensor): Original input data.
+        l1_weight (float): Weight for the L1 loss.
+    """
+    # Calculate reconstruction loss
+    recon_loss = F.l1_loss(x_recon, x) * l1_weight
+
+    # Ensure the CSV file exists and write headers if not
+    file_exists = os.path.isfile(csv_path)
+    with open(csv_path, mode='a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            # Write header if the file is being created
+            writer.writerow(["Subject ID", "Scan ID", "Reconstruction Loss"])
+        
+        # Write the loss data
+        writer.writerow([sub_id, scan_id, recon_loss.item()])
+
+
+def save_reconstructions(save_path, vqgan, val_dataset, l1_weight=4.0):
+    """
+    Save the reconstructions from the VQGAN model for the validation set and calculate reconstruction loss.
 
     Args:
         save_path (str): Directory where the reconstructions will be saved.
         vqgan (torch.nn.Module): The trained VQGAN model.
         val_dataset (torch.utils.data.Dataset): Validation dataset.
+        l1_weight (float): Weight for the L1 loss.
     """
     # Ensure the save path exists
     os.makedirs(save_path, exist_ok=True)
+
+    # Set the CSV path dynamically based on save_path
+    csv_path = os.path.join(save_path, "reconstruction_losses.csv")
 
     # Put the model in evaluation mode
     vqgan.eval()
@@ -84,8 +118,7 @@ def save_reconstructions(save_path, vqgan, val_dataset):
     for idx in tqdm(range(len(val_dataset)), desc="Saving Reconstructions"):
         # Get the data and scan_id
         sample = val_dataset[idx]
-        input_data = torch.tensor(sample['data'][None]).to(device)
-        # input_data = sample['data'].unsqueeze(0).to(vqgan.device)  # Add batch dimension
+        input_data = torch.tensor(sample['data'][None]).to(device)  # Add batch dimension
         sub_id = sample['sub_id']
         scan_id = sample['scan_id']
         
@@ -94,18 +127,20 @@ def save_reconstructions(save_path, vqgan, val_dataset):
             latent_z = vqgan.pre_vq_conv(vqgan.encoder(input_data))
             reconstructed = vqgan.decode(latent_z)
 
-        # Convert to numpy
-        input_numpy = input_data[0,0,:,:,:].cpu().numpy() #input: 1,1,64,128,128
-        # reconstructed_numpy = reconstructed.squeeze(0).cpu().numpy()
-        reconstructed_numpy = reconstructed[0,0,:,:,:].cpu().numpy()
+        # Convert input and reconstruction to numpy for saving
+        input_numpy = input_data[0, 0, :, :, :].cpu().numpy()  # Input shape: 1,1,64,128,128
+        reconstructed_numpy = reconstructed[0, 0, :, :, :].cpu().numpy()
 
-        # Save the input and reconstruction as .nii files
-        input_nifti = nib.Nifti1Image(input_numpy, affine=np.eye(4))
-        reconstructed_nifti = nib.Nifti1Image(reconstructed_numpy, affine=np.eye(4))
-
+        # Save the input and reconstruction as .nii files 
+        input_nifti = nib.Nifti1Image(np.transpose(input_numpy, (2, 1, 0)), affine=sample['upt_affine'])  # Use original affine
+        reconstructed_nifti = nib.Nifti1Image(np.transpose(reconstructed_numpy, (2, 1, 0)), affine=sample['upt_affine'])
 
         nib.save(reconstructed_nifti, os.path.join(save_path, f"{sub_id}_{scan_id}_reconstructed.nii.gz"))
         nib.save(input_nifti, os.path.join(save_path, f"{sub_id}_{scan_id}_input.nii.gz"))
+
+        # Calculate and store reconstruction loss
+        calculate_and_store_recon_loss(csv_path, sub_id, scan_id, reconstructed, input_data, l1_weight)
+
 
 def get_training_duration(base_folder):
     ckpt_files = []
@@ -177,6 +212,88 @@ def plot_recon_loss_per_epoch(base_folder, title_details):
     else:
         print("No valid checkpoints found.")
 
+def save_reconstruction_pngs(save_path, checkpoints, fold_idx, device, num_fold):
+    """
+    Save a side-by-side PNG image showing the input and reconstructions for a single sample.
+
+    Args:
+        save_path (str): Directory where the PNGs will be saved.
+        checkpoints (list): List of checkpoint paths for the fold.
+        fold_idx (int): Fold index for naming and organization.
+        device (torch.device): The device (CPU/GPU) for processing.
+    """
+
+    os.makedirs(save_path, exist_ok=True)
+
+    # Load models from checkpoints
+    models = []
+    recon_losses = []
+
+    for checkpoint in checkpoints:
+        model = VQGAN.load_from_checkpoint(checkpoint).to(device)
+        model.eval()
+        models.append(model)
+
+    # Get the validation dataset for this fold
+    val_dataset = get_val_dataset(models[0], checkpoints[0], 'CP', fold_idx, num_fold)
+
+    # Use the first sample from the validation set
+    sample = val_dataset[0]
+    input_data = torch.tensor(sample['data'][None]).to(device)  # Add batch dimension
+    sub_id = sample['sub_id']
+    scan_id = sample['scan_id']
+
+    # Generate reconstructions for each model and calculate reconstruction losses
+    reconstructions = []
+    for model in models:
+        with torch.no_grad():
+            vq_output = model.encoder(input_data)
+            latent_z = model.pre_vq_conv(vq_output)
+            reconstructed = model.decode(latent_z)
+            reconstructions.append(reconstructed[0, 0, :, :, :].cpu().numpy())
+            
+            print(f"Encoder output shape: {vq_output.shape}") #[1, 32, 32, 64, 64]
+            
+            print(f"pre_vq_conv output shape: {latent_z.shape}") #[1, 8, 32, 64, 64]
+            
+            print(f"Decoder input shape: {latent_z.shape}, output shape: {reconstructed.shape}")
+            # Decoder input shape: torch.Size([1, 8, 32, 64, 64]), output shape: torch.Size([1, 1, 64, 128, 128])
+            
+            # Compute reconstruction loss
+            # x_recon = model.decoder(model.pre_vq_conv(vq_output))
+            x_recon = model.decoder(vq_output)
+            recon_loss = F.l1_loss(x_recon, input_data) * model.l1_weight
+            recon_losses.append(recon_loss.item())
+
+    # Convert input data to numpy
+    input_numpy = input_data[0, 0, :, :, :].cpu().numpy()
+
+    # Plot the input and reconstructions
+    fig, axes = plt.subplots(1, len(models) + 1, figsize=(16, 4))
+    
+    # Plot the input
+    middle_idx = input_numpy.shape[0] // 2  # Middle slice
+    axes[0].imshow(input_numpy[middle_idx], cmap="gray")
+    axes[0].set_title("Input")
+    axes[0].axis("off")
+
+    # Plot reconstructions
+    for i, (reconstruction, loss) in enumerate(zip(reconstructions, recon_losses)):
+        axes[i + 1].imshow(reconstruction[middle_idx], cmap="gray")
+        title = f"Recon {i + 1}\nLoss: {loss:.4f}"
+        axes[i + 1].set_title(title)
+        axes[i + 1].axis("off")
+
+    # Save the plot
+    png_save_path = os.path.join(
+        save_path, f"fold_{fold_idx}_sample_{sub_id}_{scan_id}.png"
+    )
+    plt.tight_layout()
+    plt.savefig(png_save_path, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved reconstruction visualization for fold {fold_idx} to {png_save_path}")
+
 def plot_generated_samples(vqgan, train_dataset, device, epoch, sample_indices):
     """
     Plot and save input and output samples for multiple indices.
@@ -220,7 +337,118 @@ def plot_generated_samples(vqgan, train_dataset, device, epoch, sample_indices):
     plt.savefig(f'generated_vq_gan_outputs_epoch_{epoch}.png')
     plt.close(fig)
 
+def extract_scan_id(filename):
+    # Use a regex to match the desired scan ID pattern
+    match = re.search(r'_([A-Za-z0-9_\-]+)_(?:input|reconstructed)\.nii\.gz$', filename)
+    if match:
+        return match.group(1)  # Extract the matched group
+    return None
 
+def explore_data_dist_per_fold(tsv_path, fold_path, fold, exp_name):
+    data = pd.read_csv(tsv_path, sep='\t')
+
+    # Extract relevant columns: scan_id and age
+    scan_age_data = data[['scan_id', 'age']]
+
+    # Directory containing NIfTI files (simulate here with filenames)
+    scan_ids = []
+    for file in os.listdir(fold_path):
+        if file.endswith('.nii.gz'):
+            scan_ids.append(extract_scan_id(file))
+
+    # Filter the data for relevant scan IDs
+    matched_data = scan_age_data[scan_age_data['scan_id'].isin(scan_ids)]
+    # print(matched_data.head())
+
+    # Plot the age distribution
+    plt.figure(figsize=(10, 6))
+    plt.hist(matched_data['age'], bins=20, color='blue', edgecolor='black', alpha=0.7)
+    plt.title('Age Distribution of Matched Data')
+    plt.xlabel('Age')
+    plt.ylabel('Frequency')
+    plt.grid(axis='y', alpha=0.75)
+    plt.savefig(f'age_dist_{exp_name}_fold_{fold}.png')
+
+def explore_data_dist_all_folds(tsv_path, num_folds, exp_name):
+    # Load the TSV file
+    data = pd.read_csv(tsv_path, sep='\t')
+
+    # Extract relevant columns: scan_id and age
+    scan_age_data = data[['scan_id', 'age', 'sex', 'sub_id_bids']]
+
+    plt.figure(figsize=(10, 6))  # Create a single figure for overlaying plots
+
+    # Iterate through each fold
+    for fold_idx in range(num_folds):
+        # Generate the fold path
+        fold_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/fold_{fold_idx}_reconstructions'
+
+        scan_ids = []
+        for file in os.listdir(fold_path):
+            if file.endswith('.nii.gz'):
+                scan_ids.append(extract_scan_id(file))
+
+        # Filter the data for relevant scan IDs
+        matched_data = scan_age_data[scan_age_data['scan_id'].isin(scan_ids)]
+        print(matched_data.describe())
+        # Ensure each scan_id is unique
+        unique_matched_data = matched_data.drop_duplicates(subset='sub_id_bids')
+        print(unique_matched_data.describe())
+        # Keep only the sex column
+        sex_data = unique_matched_data[['sex']]
+        # Print the counts
+        print("Number of 0s:", sex_data.value_counts().get(0, 0))
+        print("Number of 1s:", sex_data.value_counts().get(1, 0))
+
+        # Plot the age distribution for this fold
+        plt.hist(
+            matched_data['age'],
+            bins=20,
+            alpha=0.5,  # Make the bars semi-transparent for overlaying
+            label=f'Fold {fold_idx}'
+        )
+
+    # Add title, labels, and legend
+    plt.title('Age Distribution Across Folds')
+    plt.xlabel('Age')
+    plt.ylabel('Frequency')
+    plt.grid(axis='y', alpha=0.75)
+    plt.legend()
+    plt.savefig(f'age_distribution_overlaid_{exp_name}.png') 
+
+def get_val_dataset(model, checkpoint_path, dataset_name, fold_idx, num_fold):
+    """
+    Get the validation dataset for the specified fold.
+
+    Args:
+        model (VQGAN): The model instance.
+        checkpoint_path (str): Path to the VQGAN checkpoint.
+        dataset_name (str): The name of the dataset (e.g., 'CP').
+        fold_idx (int): Fold index for cross-validation.
+    
+    Returns:
+        torch.utils.data.Dataset: Validation dataset for the fold.
+    """
+    if dataset_name == 'CP':
+        with initialize(config_path="../config/", version_base="1.1"):
+            cfg = compose(config_name="base_cfg.yaml", overrides=[
+                "model=ddpm",
+                f"dataset.tsv_path={tsv_path}",
+                f"model.vqgan_ckpt='{checkpoint_path}'",
+                "model.diffusion_img_size=32",
+                "model.diffusion_depth_size=32",
+                "model.diffusion_num_channels=8",
+                "model.dim_mults=[1,2,4,8]",
+                "model.batch_size=2",
+                "++model.gpus=1",
+            ])
+            print("Configuration loaded successfully.")
+    else:
+        raise ValueError(f"Dataset {dataset_name} not implemented.")
+
+    # Get the validation dataset
+    _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=num_fold)  # Adjust num_folds if necessary
+    return val_dataset
 
 if __name__ == '__main__':
     tsv_path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/all-participants.tsv'
@@ -286,53 +514,90 @@ if __name__ == '__main__':
     # for i in range(torch.cuda.device_count()):
     #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
 
-    num_folds = 5
+    # num_folds = 5
+    num_folds = 3
     paths_for_fold = []
+    # exp_name = f'exp_{num_folds}_folds'
+    exp_name = f'exp_{num_folds}_fold'
+    
+    # Plot the age distribution for all folds in one graph
+    # explore_data_dist_all_folds(tsv_path, num_folds, exp_name)
+
     for fold_idx in range(num_folds):
         # base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs"
+        # base_folder = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs"
         # path = find_best_ckpt(base_folder)
         # paths_for_fold.append(path)
 
         # Plot recon loss
-        base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints"
-        plot_recon_loss_per_epoch(base_folder, f'fold_{fold_idx}')
-        get_training_duration(base_folder)
+        # base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints"
+        # if fold_idx == 2 and '3' in exp_name:
+        #     base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_1/checkpoints"
+        # # plot_recon_loss_per_epoch(base_folder, f'fold_{fold_idx}')
+        # get_training_duration(base_folder)
 
+        # Analyze age dist
+        # fold_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/fold_{fold_idx}_reconstructions'
+        # explore_data_dist_per_fold(tsv_path, fold_path, fold_idx, exp_name)
 
+        
+        if USE_DATASET == 'CP':
+            # VQGAN_CHECKPOINT = path
+            # VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt"
+            # if fold_idx == 2:
+            #     VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_1/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt"
 
-        # if USE_DATASET == 'CP':
-        #     VQGAN_CHECKPOINT = path
-
-        #     # Specify the version_base explicitly
-        #     with initialize(config_path="../config/", version_base="1.1"):
-        #             cfg = compose(config_name="base_cfg.yaml", overrides=[
-        #                 "model=ddpm",
-        #                 f"dataset.tsv_path={tsv_path}",
-        #                 #f"dataset={dataset_name}",
-        #                 f"model.vqgan_ckpt='{VQGAN_CHECKPOINT}'",
-        #                 "model.diffusion_img_size=32",
-        #                 "model.diffusion_depth_size=32",
-        #                 "model.diffusion_num_channels=8",
-        #                 "model.dim_mults=[1,2,4,8]",
-        #                 "model.batch_size=2",
-        #                 "++model.gpus=1",
-        #             ])
-        #             print("yahoo")
-        # else:
-        #     print('Not implemented dataset') 
+            if fold_idx == 0:
+                VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.0784.ckpt"
+            elif fold_idx == 1:
+                VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.1210.ckpt"
+            else:
+                VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.2947.ckpt"
+            # Specify the version_base explicitly
+            with initialize(config_path="../config/", version_base="1.1"):
+                    cfg = compose(config_name="base_cfg.yaml", overrides=[
+                        "model=ddpm",
+                        f"dataset.tsv_path={tsv_path}",
+                        #f"dataset={dataset_name}",
+                        f"model.vqgan_ckpt='{VQGAN_CHECKPOINT}'",
+                        "model.diffusion_img_size=32",
+                        "model.diffusion_depth_size=32",
+                        "model.diffusion_num_channels=8",
+                        "model.dim_mults=[1,2,4,8]",
+                        "model.batch_size=2",
+                        "++model.gpus=1",
+                    ])
+                    print("yahoo")
+        else:
+            print('Not implemented dataset') 
 
     
 
-        # vqgan = VQGAN.load_from_checkpoint(VQGAN_CHECKPOINT)
-        # vqgan.decoding_diviser = 3  # An odd integer for VRAM optimization
-        # vqgan = vqgan.to(device)
-        # print(f"Processing Fold {fold_idx + 1}/{num_folds}")
+        vqgan = VQGAN.load_from_checkpoint(VQGAN_CHECKPOINT)
+        vqgan.decoding_diviser = 3  # An odd integer for VRAM optimization
+        vqgan = vqgan.to(device)
+        print(f"Processing Fold {fold_idx + 1}/{num_folds}")
         
-        # # Get datasets for the current fold
-        # _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=num_folds)
+        # Get datasets for the current fold
+        _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=num_folds)
         
-        # # Save reconstructions for this fold
-        # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/'
+        # Save reconstructions for this fold
+        path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/'
+        # path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/latest_checkpoint/'
+        fold_save_path = os.path.join(path, f"fold_{fold_idx}_reconstructions")
+        save_reconstructions(save_path=fold_save_path, vqgan=vqgan, val_dataset=val_dataset)
+
+        # # # Save reconstructions from latest checkpoints # # #
+        # checkpoints = [
+        # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}.ckpt",
+        # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v1.ckpt",
+        # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt",
+        # ]
+        # save_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_5_fold/fold_{fold_idx}_reconstructions'
+        
+        # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_5_fold/'
+        # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_3_fold/'
         # fold_save_path = os.path.join(path, f"fold_{fold_idx}_reconstructions")
-        # save_reconstructions(save_path=fold_save_path, vqgan=vqgan, val_dataset=val_dataset)
+        
+        # save_reconstruction_pngs(save_path, checkpoints, fold_idx, device, num_folds)
         

@@ -9,7 +9,7 @@ default_root_dir: /home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly/checkpoints/
 default_root_dir_postfix: ''
 resume_from_checkpoint:
 max_steps: -1
-max_epochs: 500
+max_epochs: 800
 # max_epochs: -1
 precision: 16
 gradient_clip_val: 1.0
