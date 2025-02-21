@@ -7,3 +7,5 @@ from dataset.lidc import LIDCDataset
 from dataset.default import DEFAULTDataset
 from dataset.bids import BIDSDataset
 from dataset.cp import CPDataset
+from dataset.bcp import BCPDataset
+from dataset.combined import CombinedDataset

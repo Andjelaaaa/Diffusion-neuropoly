@@ -1,0 +1,4 @@
+name: COMBINED
+dataset1: CPDataset
+dataset2: BCPDataset
+image_channels: 1
