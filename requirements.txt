@@ -46,7 +46,7 @@ nilearn==0.9.1
 numpy==1.23.0
 oauthlib==3.2.0
 omegaconf==2.2.3
-pandas==1.4.3
+pandas==1.4.1+computecanada
 Pillow==9.1.1
 protobuf==3.19.4
 pyasn1==0.4.8
@@ -67,12 +67,11 @@ rsa==4.8
 scikit-image==0.19.3
 scikit-learn==1.1.2
 scikit-video==1.1.11
-scipy==1.8.1
+scipy==1.8.0+computecanada
 seaborn==0.11.2
 sentry-sdk==1.7.2
 setproctitle==1.2.3
 shortuuid==1.0.9
-SimpleITK==2.1.1.2
 smmap==5.0.0
 tensorboard==2.9.1
 tensorboard-data-server==0.6.1
