@@ -1,4 +1,5 @@
 name: COMBINED
 dataset1: CPDataset
 dataset2: BCPDataset
+tsv_path: /home/andim/projects/def-bedelb/andim/
 image_channels: 1

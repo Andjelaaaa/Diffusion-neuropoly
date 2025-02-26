@@ -10,6 +10,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
+import wandb
 from torch.utils.data import DataLoader
 from ddpm.diffusion import default
 from vq_gan_3d.model import VQGAN
@@ -39,6 +40,12 @@ from monai.transforms import (
     CropForegroundd,
     Resized,
 )
+
+import torch
+import torchvision
+import numpy as np
+from PIL import Image
+
 
 def get_inversion_and_save_transforms(
     forward_transforms,
@@ -190,73 +197,6 @@ def visualize_and_save_bcpdataset(tsv_path, results_folder, num_samples=2):
         # by default, or you can specify `output_filename="..."` in SaveImaged(...).
         # So you'll see something like: subjectID_sessionID_T1w_stripped_orig.nii.gz
         print("Done inverting and saving the original-space image.\n")
-# def visualize_and_save_bcpdataset(tsv_path, results_folder, num_samples=2):
-#     """
-#     Visualize and save the middle slice of preprocessed images from BCPDataset.
-
-#     Args:
-#         tsv_path (str): Path to the participants.tsv file.
-#         results_folder (str): Path to the folder where plots will be saved.
-#         num_samples (int): Number of samples to visualize.
-#     """
-#     # Initialize the dataset
-#     dataset = BCPDataset(tsv_path=tsv_path, base_dir=os.path.dirname(tsv_path))
-
-#     # Create results folder if it doesn't exist
-#     os.makedirs(results_folder, exist_ok=True)
-
-#     print(f"Dataset size: {len(dataset)} samples")
-#     num_samples = min(num_samples, len(dataset))
-
-#     for i in range(num_samples):
-#         sample = dataset[i]  # Get a single data sample
-#         image_tensor = sample["image"]
-
-#         subject_id = sample["subject_id"]
-#         session_id = sample["session_id"]
-
-#         print("Image shape:", image_tensor.shape)  # [1, 64, 128, 128]
-#         print("Subject:", subject_id, "| Session:", session_id)
-
-#         img_data = sample["image"].squeeze().numpy()  # Remove unnecessary dimensions
-#         print("SHAPE:", img_data.shape)
-#         print("MAX:", np.max(img_data), "MIN:", np.min(img_data))
-
-#         # Ensure it's a 3D volume and select the middle slice
-#         if img_data.ndim == 3:
-#             middle_idx = img_data.shape[0] // 2  # Calculate middle slice index
-#             middle_slice = img_data[middle_idx, :, :]
-#         else:
-#             raise ValueError(f"Expected 3D data, but got {img_data.ndim}D data for sample {i + 1}")
-
-#         # Save the image as a NIfTI file with correct affine transformation
-#         # input_nifti = nib.Nifti1Image(np.transpose(img_data, (2, 1, 0)), affine=affine)
-#         # print("NEW SHAPE:", np.transpose(img_data, (2, 1, 0)).shape)
-
-#         # input_nifti = nib.Nifti1Image(img_data, affine=affine)
-
-#         # # File naming
-#         # sub_id = sample["sub_id"]
-#         # scan_id = sample["scan_id"]
-#         # nifti_save_path = os.path.join(results_folder, f"{sub_id}_{scan_id}_affine.nii.gz")
-
-#         # nib.save(input_nifti, nifti_save_path)
-#         # print(f"Saved: {nifti_save_path}")
-
-#         # Plot and save the middle slice as PNG
-#         plt.figure()
-#         plt.imshow(middle_slice, cmap="gray")
-#         plt.axis("off")
-#         plt.title(f"Sample {i + 1}, Middle Slice {middle_idx + 1}")
-
-#         # Save the plot
-#         png_save_path = os.path.join(results_folder, f"{subject_id}_{session_id}_middle_slice.png")
-#         plt.savefig(png_save_path, bbox_inches="tight")
-#         plt.close()
-
-#         print(f"Saved middle slice visualization: {png_save_path}")
-
-#     print(f"Saved {num_samples} images and visualizations to {results_folder}")
 
 def visualize_and_save_bcpdataset_prev(tsv_path, results_folder, num_samples=2):
     """
@@ -381,80 +321,111 @@ def visualize_and_save_cpdataset(tsv_path, results_folder, is_VQGAN=False, num_s
     
     print(f"Saved volumes to {results_folder}")
 
-# @hydra.main(config_path='../config', config_name='base_cfg', version_base=None)
-# def run(cfg: DictConfig):
-#     # Set the GPU to use
-#     os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.model.gpu_index)
+
+def create_3d_image_grid(
+    images: torch.Tensor, 
+    slices=None, 
+    **kwargs
+) -> Image.Image:
+    """
+    Creates a grid of selected slices from a 5D tensor of shape (B, C, D, H, W).
+    Returns a PIL image of the final grid.
     
-#     pl.seed_everything(cfg.model.seed)
-
-#     train_dataset, val_dataset, sampler = get_dataset(cfg)
-#     train_dataloader = DataLoader(dataset=train_dataset, batch_size=cfg.model.batch_size,
-#                                   num_workers=cfg.model.num_workers, sampler=sampler)
-#     val_dataloader = DataLoader(val_dataset, batch_size=cfg.model.batch_size,
-#                                 shuffle=False, num_workers=cfg.model.num_workers)
-
-#     # Automatically adjust learning rate
-#     bs, base_lr, ngpu, accumulate = cfg.model.batch_size, cfg.model.lr, cfg.model.gpus, cfg.model.accumulate_grad_batches
-
-#     with open_dict(cfg):
-#         cfg.model.lr = accumulate * (ngpu / 8.) * (bs / 4.) * base_lr
-#         cfg.model.default_root_dir = os.path.join(
-#             cfg.model.default_root_dir, cfg.dataset.name, cfg.model.default_root_dir_postfix)
-#     print("Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus/8) * {} (batchsize/4) * {:.2e} (base_lr)".format(
-#         cfg.model.lr, accumulate, ngpu / 8, bs / 4, base_lr))
-
-#     model = VQGAN(cfg)
-
-#     callbacks = [
-#         ModelCheckpoint(monitor='val/recon_loss', save_top_k=3, mode='min', filename='latest_checkpoint'),
-#         ModelCheckpoint(every_n_train_steps=3000, save_top_k=-1, filename='{epoch}-{step}-{train/recon_loss:.2f}'),
-#         ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1, filename='{epoch}-{step}-10000-{train/recon_loss:.2f}'),
-#         ImageLogger(batch_frequency=750, max_images=4, clamp=True),
-#         VideoLogger(batch_frequency=1500, max_videos=4, clamp=True)
-#     ]
-
-#     # Load the most recent checkpoint file
-#     base_dir = os.path.join(cfg.model.default_root_dir, 'lightning_logs')
-#     if os.path.exists(base_dir):
-#         log_folder = ckpt_file = ''
-#         version_id_used = step_used = 0
-#         for folder in os.listdir(base_dir):
-#             version_id = int(folder.split('_')[1])
-#             if version_id > version_id_used:
-#                 version_id_used = version_id
-#                 log_folder = folder
-#         if len(log_folder) > 0:
-#             ckpt_folder = os.path.join(base_dir, log_folder, 'checkpoints')
-#             for fn in os.listdir(ckpt_folder):
-#                 if fn == 'latest_checkpoint.ckpt':
-#                     ckpt_file = 'latest_checkpoint_prev.ckpt'
-#                     os.rename(os.path.join(ckpt_folder, fn),
-#                               os.path.join(ckpt_folder, ckpt_file))
-#             if len(ckpt_file) > 0:
-#                 cfg.model.resume_from_checkpoint = os.path.join(
-#                     ckpt_folder, ckpt_file)
-#                 print('will start from the recent ckpt %s' %
-#                       cfg.model.resume_from_checkpoint)
-        
-#     accelerator = None
-#     if cfg.model.gpus > 1:
-#         accelerator = 'ddp'
-
-#     trainer = pl.Trainer(
-#         gpus=cfg.model.gpus,
-#         accumulate_grad_batches=cfg.model.accumulate_grad_batches,
-#         default_root_dir=cfg.model.default_root_dir,
-#         resume_from_checkpoint=cfg.model.resume_from_checkpoint,
-#         callbacks=callbacks,
-#         max_steps=cfg.model.max_steps,
-#         max_epochs=cfg.model.max_epochs,
-#         precision=cfg.model.precision,
-#         gradient_clip_val=cfg.model.gradient_clip_val,
-#         accelerator=accelerator,
-#     )
+    Args:
+        images (torch.Tensor): A 5D tensor of shape (B, C, D, H, W).
+        slices (list[int] or None): Which slice indices to extract. 
+                                    If None, a single middle slice is used.
+        **kwargs: Additional kwargs for torchvision.utils.make_grid, e.g.:
+                  - 'nrow' for how many images per row
+                  - 'normalize', 'range', etc.
     
-#     trainer.fit(model, train_dataloader, val_dataloader)
+    Returns:
+        PIL.Image: A PIL image containing the grid.
+    """
+    # Make sure we're on CPU for easier PIL/numpy ops
+    images = images.cpu()
+    B, C, D, H, W = images.shape
+    
+    # Default slice is the middle if none specified
+    if slices is None:
+        slices = [D // 2]  # single slice in the middle
+
+    # Collect slices in a list of Tensors
+    all_slice_imgs = []
+    for slice_idx in slices:
+        slice_idx = min(slice_idx, D - 1)  # clamp in case slice_idx >= D
+        slice_img = images[:, :, slice_idx, :, :]  # shape: (B, C, H, W)
+        all_slice_imgs.append(slice_img)
+    
+    # Concatenate along batch dimension => shape: (B * num_slices, C, H, W)
+    slice_images = torch.cat(all_slice_imgs, dim=0)
+
+    # Create a grid (Tensor) => shape: (3, grid_height, grid_width) or (1, ...)
+    grid = torchvision.utils.make_grid(slice_images, **kwargs)
+
+    # Convert the grid to a PIL image
+    # grid shape is (C, H, W); move channel last => (H, W, C)
+    ndarr = grid.permute(1, 2, 0).numpy()
+
+    # If you used `normalize=True`, your range is [0, 1], so multiply by 255
+    # Or if not normalized, you might need to clamp instead
+    ndarr = (ndarr * 255).astype(np.uint8)
+    
+    return Image.fromarray(ndarr)
+
+class LogInputImagesCallback(Callback):
+    """
+    Logs input images to W&B during training at a given frequency.
+    """
+
+    def __init__(self, log_every_n_steps=500, max_images=4):
+        """
+        Args:
+            log_every_n_steps (int): Frequency (in steps) to log images.
+            max_images (int): How many images from the batch to log.
+        """
+        super().__init__()
+        self.log_every_n_steps = log_every_n_steps
+        self.max_images = max_images
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        """
+        This hook is called at the end of every training batch.
+        We check if it's time to log, and if so, send a few images to W&B.
+        """
+        # Only log every `log_every_n_steps` steps
+        global_step = trainer.global_step
+        if global_step % self.log_every_n_steps == 0 and global_step > 0:
+            # `batch` is typically a dict if you used a custom dataset; adjust as needed
+            # Assuming your dataset __getitem__ returns {"data": tensor, "some_label": ...}
+            images = batch["data"]  # shape: [B, C, H, W, ...] depending on your dataset
+            subject_id = batch["subject_id"]
+            images = images[: self.max_images]  # take a few images
+
+            B, C, D, H, W = images.shape
+            quarter_slice = max(D // 4, 0)
+            middle_slice = max(D // 2, 0)
+            three_quarter_slice = max((3 * D) // 4, 0)
+
+            # Create a grid from these 3 slices
+            grid_img = create_3d_image_grid(
+                images, 
+                slices=[quarter_slice, middle_slice, three_quarter_slice],
+                nrow=self.max_images 
+                # normalize=True,      # Example: turn on normalization
+                # range=(0, 1),        # Example: scale intensities from [0,1]
+                # pad_value=255        # Example: white padding
+            )
+
+            # Convert tensor to PIL image if needed
+            if isinstance(grid_img, torch.Tensor):
+                grid_img = torchvision.transforms.ToPILImage()(grid_img)
+
+            # Now log the PIL image to W&B
+            trainer.logger.experiment.log({
+                "3D_volume_slices_grid": wandb.Image(grid_img, caption=f"Subject {subject_id}"),
+                "global_step": global_step
+            })
 
 class EarlyStoppingAfter400Epochs(Callback):
     def __init__(self, patience=20, min_epochs=400):
@@ -502,15 +473,13 @@ class EarlyStoppingAfter400Epochs(Callback):
 
 @hydra.main(config_path='../config', config_name='base_cfg', version_base=None)
 def run(cfg: DictConfig):
-    # Set the GPU to use
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.model.gpu_index)
-    
     pl.seed_everything(cfg.model.seed)
 
-    num_folds = 3  # Number of folds for cross-validation
+    num_folds = 5  # Number of folds for cross-validation
 
-    # original_root_dir = os.path.join(cfg.model.default_root_dir, cfg.dataset.name)  # Preserve the original root directory
-    original_root_dir = os.path.join(cfg.model.default_root_dir, cfg.dataset.name, 'exp_combined_data_3fold')
+    # Ensure saving checkpoints in /scratch
+    scratch_dir = os.environ.get("SCRATCH", "/scratch")  # Use $SCRATCH environment variable
+    original_root_dir = os.path.join(scratch_dir, cfg.dataset.name, 'exp_combined_5fold')
 
     for fold_idx in range(num_folds):
         print(f"Training Fold {fold_idx + 1}/{num_folds}")
@@ -548,12 +517,14 @@ def run(cfg: DictConfig):
             EarlyStoppingAfter400Epochs(patience=20, min_epochs=400),
             # ModelCheckpoint(monitor='val/recon_loss', save_top_k=3, mode='min', filename=f'latest_checkpoint_fold_{fold_idx}'),
             ModelCheckpoint(every_n_train_steps=3000, save_top_k=-1, filename='{epoch}-{step}-{train/recon_loss:.2f}'),
-            ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1, filename='{epoch}-{step}-10000-{train/recon_loss:.2f}'),      
-            # ImageLogger(batch_frequency=3000, max_images=4, clamp=True),
-            # VideoLogger(batch_frequency=1500, max_videos=4, clamp=True)
+            ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1, filename='{epoch}-{step}-10000-{train/recon_loss:.2f}'), 
+            LogInputImagesCallback(log_every_n_steps=3000, max_images=1)     
         ]
 
-        wandb_logger = WandbLogger(project="VQ-GAN")
+        wandb_dir = os.path.join(scratch_dir, "wandb_logs")
+        os.makedirs(wandb_dir, exist_ok=True)
+
+        wandb_logger = WandbLogger(project="VQ-GAN", save_dir=wandb_dir, mode="offline")
         # Trainer setup
         trainer = pl.Trainer(
             logger=wandb_logger,
@@ -573,106 +544,6 @@ def run(cfg: DictConfig):
 
         print(f"Fold {fold_idx + 1} completed!")
 
-@hydra.main(config_path='../config', config_name='base_cfg', version_base=None)
-def rerun_entry(cfg: DictConfig):
-    """
-    Entry point for rerunning a specific fold.
-    """
-    # Define fold index, checkpoint path, and folder name
-    # fold_idx = 2  # Replace with the desired fold index
-    # checkpoint_path = "/home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly/checkpoints/vq_gan/CP/exp_3_folds/fold_2/lightning_logs/version_0/checkpoints/epoch=104-step=39000-train/recon_loss=3.54.ckpt"  # Replace with the actual checkpoint path
-    # folder_name = "exp_3_folds"  # Replace if different
-    # fold_idx = 0  # Replace with the desired fold index
-    # checkpoint_path = "/home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly/checkpoints/vq_gan/COMBINED/exp_combined_data_3fold/fold_0/lightning_logs/version_2/checkpoints/epoch=208-step=327000-train/recon_loss=0.12.ckpt"  # Replace with the actual checkpoint path
-    # folder_name = "exp_combined_data_3fold"  # Replace if different
-
-    fold_idx = 0  # Replace with the desired fold index
-    checkpoint_path = "/home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly/checkpoints/vq_gan/COMBINED/exp_combined_data_3fold/fold_0/lightning_logs/version_3/checkpoints/epoch=240-step=378000-train/recon_loss=0.10.ckpt"  # Replace with the actual checkpoint path
-    folder_name = "exp_combined_data_3fold"  # Replace if different
-
-    rerun_specific_fold(cfg, fold_idx, checkpoint_path, folder_name)
-
-
-def rerun_specific_fold(cfg: DictConfig, fold_idx: int, checkpoint_path: str, folder_name: str):
-    """
-    Retrain a specific fold from a given checkpoint.
-
-    Args:
-        cfg (DictConfig): Hydra configuration object.
-        fold_idx (int): Index of the fold to retrain.
-        checkpoint_path (str): Path to the checkpoint for resuming.
-        folder_name (str): Subfolder name for saving results.
-    """
-    # Set the GPU to use
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.model.gpu_index)
-    
-    pl.seed_everything(cfg.model.seed)
-
-    original_root_dir = os.path.join(cfg.model.default_root_dir, cfg.dataset.name, folder_name)
-
-    print(f"Retraining Fold {fold_idx + 1}")
-
-    # Train the specified fold
-    train_single_fold(cfg, fold_idx, original_root_dir, checkpoint_path=checkpoint_path)
-
-
-def train_single_fold(cfg, fold_idx, original_root_dir, checkpoint_path=None):
-    """
-    Train a single fold.
-
-    Args:
-        cfg (DictConfig): Hydra configuration object.
-        fold_idx (int): Index of the fold to train.
-        original_root_dir (str): Root directory for saving results.
-        checkpoint_path (str): Path to the checkpoint for resuming training. Default is None.
-    """
-    # Get datasets for the specified fold
-    train_dataset, val_dataset, sampler = get_dataset(cfg, fold_idx=fold_idx, num_folds=cfg.get('num_folds', 3), d_size=64)
-    
-    # Initialize DataLoaders
-    train_dataloader = DataLoader(dataset=train_dataset, batch_size=cfg.model.batch_size,
-                                  num_workers=cfg.model.num_workers, sampler=sampler)
-    val_dataloader = DataLoader(val_dataset, batch_size=cfg.model.batch_size,
-                                shuffle=False, num_workers=cfg.model.num_workers)
-
-    # Adjust learning rate dynamically
-    bs, base_lr, ngpu, accumulate = cfg.model.batch_size, cfg.model.lr, cfg.model.gpus, cfg.model.accumulate_grad_batches
-    with open_dict(cfg):
-        cfg.model.lr = accumulate * (ngpu / 8.) * (bs / 4.) * base_lr
-
-    # Use a separate variable for the fold-specific directory
-    fold_specific_dir = os.path.join(original_root_dir, f"fold_{fold_idx}")
-    os.makedirs(fold_specific_dir, exist_ok=True)  # Ensure the directory exists
-    print(f"Fold {fold_idx + 1}: Learning Rate = {cfg.model.lr:.2e}")
-    print(f"Saving results to: {fold_specific_dir}")
-
-    # Initialize the model
-    model = VQGAN(cfg)
-
-    # Define callbacks
-    callbacks = [
-        ModelCheckpoint(monitor='val/recon_loss', save_top_k=3, mode='min', filename=f'latest_checkpoint_fold_{fold_idx}'),
-        ModelCheckpoint(every_n_train_steps=3000, save_top_k=-1, filename='{epoch}-{step}-{train/recon_loss:.2f}'),
-        ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1, filename='{epoch}-{step}-10000-{train/recon_loss:.2f}'),      
-    ]
-
-    # Trainer setup
-    trainer = pl.Trainer(
-        gpus=cfg.model.gpus,
-        accumulate_grad_batches=cfg.model.accumulate_grad_batches,
-        default_root_dir=fold_specific_dir,
-        resume_from_checkpoint=checkpoint_path,  # Resume from checkpoint if provided
-        callbacks=callbacks,
-        max_steps=cfg.model.max_steps,
-        max_epochs=cfg.model.max_epochs,
-        precision=cfg.model.precision,
-        gradient_clip_val=cfg.model.gradient_clip_val,
-    )
-    
-    # Start training
-    trainer.fit(model, train_dataloader, val_dataloader)
-    print(f"Training for Fold {fold_idx + 1} completed!")
-
 if __name__ == '__main__':
     # tsv_path = "/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/all-participants.tsv"  # Replace with the actual path
     # results_folder = "./results/"  # Replace with the desired folder
@@ -684,5 +555,3 @@ if __name__ == '__main__':
     
     # To run all folds
     run()
-    # To retrain a specific fold (uncomment the following lines for specific use case)
-    # rerun_entry()

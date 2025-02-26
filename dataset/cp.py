@@ -54,7 +54,7 @@ def create_bcp_records(tsv_path: str):
             session_id = session.strip()
             anat_dir = os.path.join(
                 base_dir,
-                f"derivatives/n4_bias_correction/{subject_id}/{session_id}/anat/"
+                f"n4_bias_correction/{subject_id}/{session_id}/anat/"
             )
             if not os.path.exists(anat_dir):
                 print(f"Missing directory: {anat_dir}")
@@ -178,7 +178,7 @@ class CPDataset(Dataset):
         output = self.transform(data_item)
 
         # Check for NaNs in the output tensor
-        assert not torch.isnan(output["data"]).any(), f"NaN values found in 'data' for subject {data_item["subject_id"]}"
+        assert not torch.isnan(output["data"]).any(), f"NaN values found in 'data' for subject {data_item['subject_id']}"
 
         return output
 

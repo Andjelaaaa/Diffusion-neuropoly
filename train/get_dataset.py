@@ -9,10 +9,8 @@ def get_dataset(cfg, fold_idx=None, num_folds=5, d_size=64):
         dataset = BCPDataset(tsv_path=cfg.dataset.tsv_path, d_size=d_size)
         return dataset
     if cfg.dataset.name == 'COMBINED':  # If using a combined dataset
-        # dataset1 = CPDataset(tsv_path=cfg.dataset.tsv_path, d_size=d_size)
-        # dataset2 = BCPDataset(root_dir=cfg.dataset.root_dir, is_VQGAN=cfg.dataset.is_VQGAN)
-        dataset1 = CPDataset(tsv_path='/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/hc-calgary-preschool/participants.tsv')
-        dataset2 = BCPDataset(tsv_path='/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/hc-bcp/participants.tsv')
+        dataset1 = CPDataset(tsv_path=f'{cfg.dataset.tsv_path}hc-calgary-preschool/participants.tsv')
+        dataset2 = BCPDataset(tsv_path=f'{cfg.dataset.tsv_path}hc-bcp/participants.tsv')
         
         combined_dataset = CombinedDataset(dataset1, dataset2)
 
