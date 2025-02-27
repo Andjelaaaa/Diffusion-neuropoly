@@ -411,10 +411,10 @@ class LogInputImagesCallback(Callback):
             grid_img = create_3d_image_grid(
                 images, 
                 slices=[quarter_slice, middle_slice, three_quarter_slice],
-                nrow=self.max_images 
-                # normalize=True,      # Example: turn on normalization
-                # range=(0, 1),        # Example: scale intensities from [0,1]
-                # pad_value=255        # Example: white padding
+                nrow=self.max_images, 
+                normalize=True,      # Example: turn on normalization
+                range=(0, 1),        # Example: scale intensities from [0,1]
+                pad_value=255        # Example: white padding
             )
 
             # Convert tensor to PIL image if needed
@@ -423,7 +423,7 @@ class LogInputImagesCallback(Callback):
 
             # Now log the PIL image to W&B
             trainer.logger.experiment.log({
-                "3D_volume_slices_grid": wandb.Image(grid_img, caption=f"Subject {subject_id}"),
+                f"3D_volume_slices_grid_{subject_id}": wandb.Image(grid_img, caption=f"Subject {subject_id}"),
                 "global_step": global_step
             })
 
@@ -521,7 +521,7 @@ def run(cfg: DictConfig):
             LogInputImagesCallback(log_every_n_steps=3000, max_images=1)     
         ]
 
-        wandb_dir = os.path.join(scratch_dir, "wandb_logs")
+        wandb_dir = os.path.join(fold_specific_dir, "wandb_logs")
         os.makedirs(wandb_dir, exist_ok=True)
 
         wandb_logger = WandbLogger(project="VQ-GAN", save_dir=wandb_dir, mode="offline")
