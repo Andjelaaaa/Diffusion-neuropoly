@@ -31,7 +31,7 @@ from monai.transforms import (
 import torch
 from torch.utils.data.dataset import Dataset
 
-def create_bcp_records(tsv_path: str):
+def create_cp_records(tsv_path: str):
     """
     Parse the participants.tsv to collect NIfTI file paths plus subject/session info.
     Returns a list of dicts, each with:
@@ -152,7 +152,7 @@ class CPDataset(Dataset):
     ):
         super().__init__()
         # Create list of dicts: [{"image": ..., "subject_id": ..., "session_id": ...}, ...]
-        self.data_dicts = create_bcp_records(tsv_path)
+        self.data_dicts = create_cp_records(tsv_path)
 
         # If no transform is passed, use the default pipeline
         if transform is None:

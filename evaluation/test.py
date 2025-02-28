@@ -1,8 +1,8 @@
 
 import os
-GPU_ID = 1 
-os.environ["CUDA_VISIBLE_DEVICES"]=f"{GPU_ID}"
-device = f'cuda:0'
+# GPU_ID = 1 
+# os.environ["CUDA_VISIBLE_DEVICES"]=f"{GPU_ID}"
+# device = f'cuda:0'
 import sys
 from re import I
 import re
@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 # Add the root directory of the project to sys.path
-project_root = os.path.abspath("/home/GRAMES.POLYMTL.CA/andim/Diffusion-neuropoly")
+project_root = os.path.abspath("/home/andim/Diffusion-neuropoly")
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -452,155 +452,239 @@ def get_val_dataset(model, checkpoint_path, dataset_name, fold_idx, num_fold):
     _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=num_fold)  # Adjust num_folds if necessary
     return val_dataset
 
-if __name__ == '__main__':
-    tsv_path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/all-participants.tsv'
-    dataset_name = "cp"
-    
-    USE_DATASET = 'CP'
-    
+def reconstruct_combined_dataset(exp_name, dataset_name, fold_idx, checkpoint_path, scratch_dir, dataset_base_path, device="cuda:0"):
+    """
+    Reconstructs validation set images from the combined dataset (CP + BCP) using VQGAN.
+    Saves both inputs & reconstructions as seen by the network (before Invertd).
 
-    if USE_DATASET == 'CP':
-        # VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=474-step=204000-train/recon_loss=0.08.ckpt"
-        # VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=481-step=207000-train/recon_loss=0.12.ckpt"
-        # VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=302-step=130000-10000-train/recon_loss=0.07.ckpt"
-        VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=325-step=140000-10000-train/recon_loss=0.04.ckpt"
+    Args:
+        exp_name (str): Experiment name.
+        fold_idx (int): Fold index (e.g., 0, 1, 2, etc.).
+        checkpoint_path (str): Path to the VQGAN model checkpoint.
+        scratch_dir (str): Base directory where outputs will be saved.
+        dataset_base_path (str): Path to the base directory containing datasets.
+        device (str): The device to run computations on (default: "cuda:0").
+    """
 
-        # Specify the version_base explicitly
-        with initialize(config_path="../config/", version_base="1.1"):
-                cfg = compose(config_name="base_cfg.yaml", overrides=[
-                    "model=ddpm",
-                    f"dataset.tsv_path={tsv_path}",
-                    #f"dataset={dataset_name}",
-                    f"model.vqgan_ckpt='{VQGAN_CHECKPOINT}'",
-                    "model.diffusion_img_size=32",
-                    "model.diffusion_depth_size=32",
-                    "model.diffusion_num_channels=8",
-                    "model.dim_mults=[1,2,4,8]",
-                    "model.batch_size=2",
-                    "++model.gpus=1",
-                ])
-                print("yahoo")
-    else:
-        print('Not implemented dataset') 
+    # Set up the evaluation directory
+    save_path = os.path.join(scratch_dir, "evaluation", exp_name, f"fold_{fold_idx}_reconstructions")
+    os.makedirs(save_path, exist_ok=True)
 
-    train_dataset = get_dataset(cfg)
-
-    vqgan = VQGAN.load_from_checkpoint(VQGAN_CHECKPOINT)
-    vqgan.decoding_diviser = 3  # An odd integer for VRAM optimization
-    vqgan = vqgan.to(device)
+    # Load the trained VQGAN model
+    print(f"Loading model from: {checkpoint_path}")
+    vqgan = VQGAN.load_from_checkpoint(checkpoint_path).to(device)
     vqgan.eval()
 
-    # Split the path and extract the epoch part
-    for part in VQGAN_CHECKPOINT.split('/'):
-        if 'epoch=' in part:
-            epoch = int(part.split('=')[1].split('-')[0])  # Extract and convert to integer
+    with initialize(config_path="../config/", version_base="1.1"):
+        cfg = compose(config_name="base_cfg.yaml", overrides=[
+            f"dataset={dataset_name}",
+            f"dataset.tsv_path={dataset_base_path}",
+            f"+model.vqgan_ckpt='{checkpoint_path}'",
+            "+model.diffusion_img_size=32",
+            "+model.diffusion_depth_size=32",
+            "+model.diffusion_num_channels=8",
+            "+model.dim_mults=[1,2,4,8]",
+            "model.batch_size=2",
+            "++model.gpus=1",
+        ])
+
+    # Load validation dataset using get_dataset (which internally handles COMBINED)
+    print(f"Loading validation dataset for fold {fold_idx}...")
+    _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=5)  # Adjust `num_folds` if needed
+
+    print(f"Fold {fold_idx}: Validation dataset size = {len(val_dataset)}")
+
+    # Iterate through the validation dataset and generate reconstructions
+    print(f"Generating and saving network inputs and outputs for fold {fold_idx}...")
+    for idx in tqdm(range(len(val_dataset)), desc="Processing images"):
+        # Load sample
+        sample = val_dataset[idx]
+        input_data = torch.tensor(sample['data'][None]).to(device)  # Add batch dimension
+        sub_id = sample['subject_id']
+        scan_id = sample['session_id']  # Ensure session_id is correctly used
+
+        with torch.no_grad():
+            # Encode and decode
+            latent_z = vqgan.pre_vq_conv(vqgan.encoder(input_data))
+            reconstructed = vqgan.decode(latent_z)
+
+        # Convert tensors to numpy (before inverting transforms!)
+        input_numpy = input_data[0, 0, :, :, :].cpu().numpy()
+        reconstructed_numpy = reconstructed[0, 0, :, :, :].cpu().numpy()
+
+        # Save as NIfTI files (network-preprocessed version)
+        input_nifti = nib.Nifti1Image(input_numpy, affine=np.eye(4))  # Identity affine (not original)
+        reconstructed_nifti = nib.Nifti1Image(reconstructed_numpy, affine=np.eye(4))
+
+        input_path = os.path.join(save_path, f"{sub_id}_{scan_id}_input_network.nii.gz")
+        recon_path = os.path.join(save_path, f"{sub_id}_{scan_id}_reconstructed_network.nii.gz")
+
+        nib.save(input_nifti, input_path)
+        nib.save(reconstructed_nifti, recon_path)
+
+        print(f"Saved: {input_path} and {recon_path}")
+
+    print(f"All network-space reconstructions saved in: {save_path}")
+
+if __name__ == '__main__':
+    exp_name = "exp_combined_5fold"
+    fold_idx = 0
+    checkpoint_path = "/home/andim/scratch/COMBINED/exp_combined_5fold/fold_0/wandb_logs/VQ-GAN/3ctf1vvp/checkpoints/latest_checkpoint_fold_0-val_loss=val/recon_loss=0.0970.ckpt"
+    scratch_dir = "/home/andim/scratch"
+    dataset_base_path = "/home/andim/projects/def-bedelb/andim/"
+    dataset_name = 'combined'
+
+    reconstruct_combined_dataset(exp_name, dataset_name, fold_idx, checkpoint_path, scratch_dir, dataset_base_path)
+
+
+    # tsv_path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/all-participants.tsv'
+    # dataset_name = "cp"
     
-    # # Plot generated samples for a specific epoch
-    # plot_generated_samples(train_dataset, device, epoch, [0,1,2,3])
-    # plot_generated_samples(vqgan, train_dataset, device, epoch, [0,1,2,3])
-    plot_generated_samples(vqgan, train_dataset, device, epoch, [0,1,2,3], 'first')
-
-    # Base folder to start the search
-    # base_folder = "../checkpoints/vq_gan/CP/lightning_logs"
-    # find_best_ckpt(base_folder)
-
-    # Plot recon loss
-    # base_folder = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints"
-    # plot_recon_loss_per_epoch(base_folder)
-    # get_training_duration(base_folder)
-
-    #################################################################################
-    ########################VQ-GAN Testing on reconstructions per subject############
-
-    # import torch
-    # print(torch.cuda.device_count())  # Number of available GPUs
-    # for i in range(torch.cuda.device_count()):
-    #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
-
-    # num_folds = 5
-    num_folds = 3
-    paths_for_fold = []
-    # exp_name = f'exp_{num_folds}_folds'
-    exp_name = f'exp_{num_folds}_fold'
-    
-    # Plot the age distribution for all folds in one graph
-    # explore_data_dist_all_folds(tsv_path, num_folds, exp_name)
-
-    # for fold_idx in range(num_folds):
-        # base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs"
-        # base_folder = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs"
-        # path = find_best_ckpt(base_folder)
-        # paths_for_fold.append(path)
-
-        # Plot recon loss
-        # base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints"
-        # if fold_idx == 2 and '3' in exp_name:
-        #     base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_1/checkpoints"
-        # # plot_recon_loss_per_epoch(base_folder, f'fold_{fold_idx}')
-        # get_training_duration(base_folder)
-
-        # Analyze age dist
-        # fold_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/fold_{fold_idx}_reconstructions'
-        # explore_data_dist_per_fold(tsv_path, fold_path, fold_idx, exp_name)
-
-        
-        # if USE_DATASET == 'CP':
-        #     # VQGAN_CHECKPOINT = path
-        #     # VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt"
-        #     # if fold_idx == 2:
-        #     #     VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_1/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt"
-
-        #     if fold_idx == 0:
-        #         VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.0784.ckpt"
-        #     elif fold_idx == 1:
-        #         VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.1210.ckpt"
-        #     else:
-        #         VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.2947.ckpt"
-        #     # Specify the version_base explicitly
-        #     with initialize(config_path="../config/", version_base="1.1"):
-        #             cfg = compose(config_name="base_cfg.yaml", overrides=[
-        #                 "model=ddpm",
-        #                 f"dataset.tsv_path={tsv_path}",
-        #                 #f"dataset={dataset_name}",
-        #                 f"model.vqgan_ckpt='{VQGAN_CHECKPOINT}'",
-        #                 "model.diffusion_img_size=32",
-        #                 "model.diffusion_depth_size=32",
-        #                 "model.diffusion_num_channels=8",
-        #                 "model.dim_mults=[1,2,4,8]",
-        #                 "model.batch_size=2",
-        #                 "++model.gpus=1",
-        #             ])
-        #             print("yahoo")
-        # else:
-        #     print('Not implemented dataset') 
-
+    # USE_DATASET = 'CP'
     
 
-        # vqgan = VQGAN.load_from_checkpoint(VQGAN_CHECKPOINT)
-        # vqgan.decoding_diviser = 3  # An odd integer for VRAM optimization
-        # vqgan = vqgan.to(device)
-        # print(f"Processing Fold {fold_idx + 1}/{num_folds}")
-        
-        # # Get datasets for the current fold
-        # _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=num_folds)
-        
-        # # Save reconstructions for this fold
-        # path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/'
-        # # path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/latest_checkpoint/'
-        # fold_save_path = os.path.join(path, f"fold_{fold_idx}_reconstructions")
-        # save_reconstructions(save_path=fold_save_path, vqgan=vqgan, val_dataset=val_dataset)
+    # if USE_DATASET == 'CP':
+    #     # VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=474-step=204000-train/recon_loss=0.08.ckpt"
+    #     # VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=481-step=207000-train/recon_loss=0.12.ckpt"
+    #     # VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=302-step=130000-10000-train/recon_loss=0.07.ckpt"
+    #     VQGAN_CHECKPOINT = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints/epoch=325-step=140000-10000-train/recon_loss=0.04.ckpt"
 
-        # # # Save reconstructions from latest checkpoints # # #
-        # checkpoints = [
-        # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}.ckpt",
-        # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v1.ckpt",
-        # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt",
-        # ]
-        # save_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_5_fold/fold_{fold_idx}_reconstructions'
+    #     # Specify the version_base explicitly
+    #     with initialize(config_path="../config/", version_base="1.1"):
+    #             cfg = compose(config_name="base_cfg.yaml", overrides=[
+    #                 "model=ddpm",
+    #                 f"dataset.tsv_path={tsv_path}",
+    #                 #f"dataset={dataset_name}",
+    #                 f"model.vqgan_ckpt='{VQGAN_CHECKPOINT}'",
+    #                 "model.diffusion_img_size=32",
+    #                 "model.diffusion_depth_size=32",
+    #                 "model.diffusion_num_channels=8",
+    #                 "model.dim_mults=[1,2,4,8]",
+    #                 "model.batch_size=2",
+    #                 "++model.gpus=1",
+    #             ])
+    #             print("yahoo")
+    # else:
+    #     print('Not implemented dataset') 
+
+    # train_dataset = get_dataset(cfg)
+
+    # vqgan = VQGAN.load_from_checkpoint(VQGAN_CHECKPOINT)
+    # vqgan.decoding_diviser = 3  # An odd integer for VRAM optimization
+    # vqgan = vqgan.to(device)
+    # vqgan.eval()
+
+    # # Split the path and extract the epoch part
+    # for part in VQGAN_CHECKPOINT.split('/'):
+    #     if 'epoch=' in part:
+    #         epoch = int(part.split('=')[1].split('-')[0])  # Extract and convert to integer
+    
+    # # # Plot generated samples for a specific epoch
+    # # plot_generated_samples(train_dataset, device, epoch, [0,1,2,3])
+    # # plot_generated_samples(vqgan, train_dataset, device, epoch, [0,1,2,3])
+    # plot_generated_samples(vqgan, train_dataset, device, epoch, [0,1,2,3], 'first')
+
+    # # Base folder to start the search
+    # # base_folder = "../checkpoints/vq_gan/CP/lightning_logs"
+    # # find_best_ckpt(base_folder)
+
+    # # Plot recon loss
+    # # base_folder = "../checkpoints/vq_gan/CP/lightning_logs/version_1/checkpoints"
+    # # plot_recon_loss_per_epoch(base_folder)
+    # # get_training_duration(base_folder)
+
+    # #################################################################################
+    # ########################VQ-GAN Testing on reconstructions per subject############
+
+    # # import torch
+    # # print(torch.cuda.device_count())  # Number of available GPUs
+    # # for i in range(torch.cuda.device_count()):
+    # #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
+
+    # # num_folds = 5
+    # num_folds = 3
+    # paths_for_fold = []
+    # # exp_name = f'exp_{num_folds}_folds'
+    # exp_name = f'exp_{num_folds}_fold'
+    
+    # # Plot the age distribution for all folds in one graph
+    # # explore_data_dist_all_folds(tsv_path, num_folds, exp_name)
+
+    # # for fold_idx in range(num_folds):
+    #     # base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs"
+    #     # base_folder = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs"
+    #     # path = find_best_ckpt(base_folder)
+    #     # paths_for_fold.append(path)
+
+    #     # Plot recon loss
+    #     # base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints"
+    #     # if fold_idx == 2 and '3' in exp_name:
+    #     #     base_folder = f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_1/checkpoints"
+    #     # # plot_recon_loss_per_epoch(base_folder, f'fold_{fold_idx}')
+    #     # get_training_duration(base_folder)
+
+    #     # Analyze age dist
+    #     # fold_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/fold_{fold_idx}_reconstructions'
+    #     # explore_data_dist_per_fold(tsv_path, fold_path, fold_idx, exp_name)
+
         
-        # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_5_fold/'
-        # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_3_fold/'
-        # fold_save_path = os.path.join(path, f"fold_{fold_idx}_reconstructions")
+    #     # if USE_DATASET == 'CP':
+    #     #     # VQGAN_CHECKPOINT = path
+    #     #     # VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt"
+    #     #     # if fold_idx == 2:
+    #     #     #     VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_1/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt"
+
+    #     #     if fold_idx == 0:
+    #     #         VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.0784.ckpt"
+    #     #     elif fold_idx == 1:
+    #     #         VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.1210.ckpt"
+    #     #     else:
+    #     #         VQGAN_CHECKPOINT = f"../checkpoints/vq_gan/CP/{exp_name}/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-val_loss=val/recon_loss=0.2947.ckpt"
+    #     #     # Specify the version_base explicitly
+    #     #     with initialize(config_path="../config/", version_base="1.1"):
+    #     #             cfg = compose(config_name="base_cfg.yaml", overrides=[
+    #     #                 "model=ddpm",
+    #     #                 f"dataset.tsv_path={tsv_path}",
+    #     #                 #f"dataset={dataset_name}",
+    #     #                 f"model.vqgan_ckpt='{VQGAN_CHECKPOINT}'",
+    #     #                 "model.diffusion_img_size=32",
+    #     #                 "model.diffusion_depth_size=32",
+    #     #                 "model.diffusion_num_channels=8",
+    #     #                 "model.dim_mults=[1,2,4,8]",
+    #     #                 "model.batch_size=2",
+    #     #                 "++model.gpus=1",
+    #     #             ])
+    #     #             print("yahoo")
+    #     # else:
+    #     #     print('Not implemented dataset') 
+
+    
+
+    #     # vqgan = VQGAN.load_from_checkpoint(VQGAN_CHECKPOINT)
+    #     # vqgan.decoding_diviser = 3  # An odd integer for VRAM optimization
+    #     # vqgan = vqgan.to(device)
+    #     # print(f"Processing Fold {fold_idx + 1}/{num_folds}")
         
-        # save_reconstruction_pngs(save_path, checkpoints, fold_idx, device, num_folds)
+    #     # # Get datasets for the current fold
+    #     # _, val_dataset, _ = get_dataset(cfg, fold_idx=fold_idx, num_folds=num_folds)
+        
+    #     # # Save reconstructions for this fold
+    #     # path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/'
+    #     # # path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/{exp_name}/latest_checkpoint/'
+    #     # fold_save_path = os.path.join(path, f"fold_{fold_idx}_reconstructions")
+    #     # save_reconstructions(save_path=fold_save_path, vqgan=vqgan, val_dataset=val_dataset)
+
+    #     # # # Save reconstructions from latest checkpoints # # #
+    #     # checkpoints = [
+    #     # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}.ckpt",
+    #     # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v1.ckpt",
+    #     # f"../checkpoints/vq_gan/CP/fold_{fold_idx}/lightning_logs/version_0/checkpoints/latest_checkpoint_fold_{fold_idx}-v2.ckpt",
+    #     # ]
+    #     # save_path = f'/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_5_fold/fold_{fold_idx}_reconstructions'
+        
+    #     # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_5_fold/'
+    #     # path = '/home/GRAMES.POLYMTL.CA/andim/joplin-intra-inter/VQ-GAN/exp_3_fold/'
+    #     # fold_save_path = os.path.join(path, f"fold_{fold_idx}_reconstructions")
+        
+    #     # save_reconstruction_pngs(save_path, checkpoints, fold_idx, device, num_folds)
         

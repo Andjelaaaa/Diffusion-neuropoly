@@ -322,60 +322,9 @@ def visualize_and_save_cpdataset(tsv_path, results_folder, is_VQGAN=False, num_s
     print(f"Saved volumes to {results_folder}")
 
 
-def create_3d_image_grid(
-    images: torch.Tensor, 
-    slices=None, 
-    **kwargs
-) -> Image.Image:
-    """
-    Creates a grid of selected slices from a 5D tensor of shape (B, C, D, H, W).
-    Returns a PIL image of the final grid.
-    
-    Args:
-        images (torch.Tensor): A 5D tensor of shape (B, C, D, H, W).
-        slices (list[int] or None): Which slice indices to extract. 
-                                    If None, a single middle slice is used.
-        **kwargs: Additional kwargs for torchvision.utils.make_grid, e.g.:
-                  - 'nrow' for how many images per row
-                  - 'normalize', 'range', etc.
-    
-    Returns:
-        PIL.Image: A PIL image containing the grid.
-    """
-    # Make sure we're on CPU for easier PIL/numpy ops
-    images = images.cpu()
-    B, C, D, H, W = images.shape
-    
-    # Default slice is the middle if none specified
-    if slices is None:
-        slices = [D // 2]  # single slice in the middle
-
-    # Collect slices in a list of Tensors
-    all_slice_imgs = []
-    for slice_idx in slices:
-        slice_idx = min(slice_idx, D - 1)  # clamp in case slice_idx >= D
-        slice_img = images[:, :, slice_idx, :, :]  # shape: (B, C, H, W)
-        all_slice_imgs.append(slice_img)
-    
-    # Concatenate along batch dimension => shape: (B * num_slices, C, H, W)
-    slice_images = torch.cat(all_slice_imgs, dim=0)
-
-    # Create a grid (Tensor) => shape: (3, grid_height, grid_width) or (1, ...)
-    grid = torchvision.utils.make_grid(slice_images, **kwargs)
-
-    # Convert the grid to a PIL image
-    # grid shape is (C, H, W); move channel last => (H, W, C)
-    ndarr = grid.permute(1, 2, 0).numpy()
-
-    # If you used `normalize=True`, your range is [0, 1], so multiply by 255
-    # Or if not normalized, you might need to clamp instead
-    ndarr = (ndarr * 255).astype(np.uint8)
-    
-    return Image.fromarray(ndarr)
-
 class LogInputImagesCallback(Callback):
     """
-    Logs input images to W&B during training at a given frequency.
+    Logs input and reconstructed images to W&B during training at a given frequency.
     """
 
     def __init__(self, log_every_n_steps=500, max_images=4):
@@ -393,39 +342,173 @@ class LogInputImagesCallback(Callback):
         This hook is called at the end of every training batch.
         We check if it's time to log, and if so, send a few images to W&B.
         """
-        # Only log every `log_every_n_steps` steps
         global_step = trainer.global_step
         if global_step % self.log_every_n_steps == 0 and global_step > 0:
-            # `batch` is typically a dict if you used a custom dataset; adjust as needed
-            # Assuming your dataset __getitem__ returns {"data": tensor, "some_label": ...}
-            images = batch["data"]  # shape: [B, C, H, W, ...] depending on your dataset
-            subject_id = batch["subject_id"]
-            images = images[: self.max_images]  # take a few images
+            images = batch["data"][: self.max_images]  # Take a few images
+            subject_ids = batch["subject_id"][: self.max_images]
+            session_ids = batch["session_id"][: self.max_images]
 
-            B, C, D, H, W = images.shape
-            quarter_slice = max(D // 4, 0)
-            middle_slice = max(D // 2, 0)
-            three_quarter_slice = max((3 * D) // 4, 0)
+            # Move images to the same device as the model
+            images = images.to(pl_module.device)
 
-            # Create a grid from these 3 slices
-            grid_img = create_3d_image_grid(
-                images, 
-                slices=[quarter_slice, middle_slice, three_quarter_slice],
-                nrow=self.max_images, 
-                normalize=True,      # Example: turn on normalization
-                range=(0, 1),        # Example: scale intensities from [0,1]
-                pad_value=255        # Example: white padding
-            )
+            # Generate reconstructions
+            with torch.no_grad():
+                latent_z = pl_module.pre_vq_conv(pl_module.encoder(images))
+                reconstructed = pl_module.decode(latent_z)
 
-            # Convert tensor to PIL image if needed
-            if isinstance(grid_img, torch.Tensor):
-                grid_img = torchvision.transforms.ToPILImage()(grid_img)
+            # Create a side-by-side visualization
+            grid_img = self.create_3d_comparison_grid(images, reconstructed, slices=[images.shape[2] // 2])
 
-            # Now log the PIL image to W&B
+            # Log to W&B
             trainer.logger.experiment.log({
-                f"3D_volume_slices_grid_{subject_id}": wandb.Image(grid_img, caption=f"Subject {subject_id}"),
+                f"3D_volume_comparison_{subject_ids[0]}_{session_ids[0]}": wandb.Image(grid_img, caption=f"Subject {subject_ids[0]}_{session_ids[0]}"),
                 "global_step": global_step
             })
+
+    def create_3d_comparison_grid(self, input_images, reconstructed_images, slices=None, **kwargs):
+        """
+        Creates a side-by-side grid comparing input images and their reconstructions.
+        Returns a PIL image.
+        """
+        # Ensure tensors are on CPU for PIL processing
+        input_images, reconstructed_images = input_images.cpu(), reconstructed_images.cpu()
+        B, C, D, H, W = input_images.shape
+
+        # Normalize from [-1,1] to [0,1]
+        input_images = (input_images + 1) / 2
+        reconstructed_images = (reconstructed_images + 1) / 2
+
+        if slices is None:
+            slices = [D // 2]  # Use the middle slice
+
+        all_input_slices, all_recon_slices = [], []
+
+        for slice_idx in slices:
+            slice_idx = min(slice_idx, D - 1)  # Clamp in case slice_idx >= D
+            all_input_slices.append(input_images[:, :, slice_idx, :, :])  # shape: (B, C, H, W)
+            all_recon_slices.append(reconstructed_images[:, :, slice_idx, :, :])  # shape: (B, C, H, W)
+
+        # Stack along batch dimension => shape: (B * num_slices, C, H, W)
+        input_grid = torch.cat(all_input_slices, dim=0)
+        recon_grid = torch.cat(all_recon_slices, dim=0)
+
+        # Create individual grids
+        input_grid_img = torchvision.utils.make_grid(input_grid, **kwargs)
+        recon_grid_img = torchvision.utils.make_grid(recon_grid, **kwargs)
+
+        # Concatenate both images side by side
+        combined_grid = torch.cat([input_grid_img, recon_grid_img], dim=2)  # Concatenate along width
+
+        # Convert Tensor (C, H, W) → NumPy (H, W, C)
+        ndarr = combined_grid.permute(1, 2, 0).numpy()
+        ndarr = (ndarr * 255).astype(np.uint8)  # Convert to 8-bit image
+
+        return Image.fromarray(ndarr)
+
+# def create_3d_image_grid(
+#     images: torch.Tensor, 
+#     slices=None, 
+#     **kwargs
+# ) -> Image.Image:
+#     """
+#     Creates a grid of selected slices from a 5D tensor of shape (B, C, D, H, W).
+#     Returns a PIL image of the final grid.
+    
+#     Args:
+#         images (torch.Tensor): A 5D tensor of shape (B, C, D, H, W).
+#         slices (list[int] or None): Which slice indices to extract. 
+#                                     If None, a single middle slice is used.
+#         **kwargs: Additional kwargs for torchvision.utils.make_grid, e.g.:
+#                   - 'nrow' for how many images per row
+#                   - 'normalize', 'range', etc.
+    
+#     Returns:
+#         PIL.Image: A PIL image containing the grid.
+#     """
+#     # Make sure we're on CPU for easier PIL/numpy ops
+#     images = images.cpu()
+#     B, C, D, H, W = images.shape
+    
+#     # Default slice is the middle if none specified
+#     if slices is None:
+#         slices = [D // 2]  # single slice in the middle
+
+#     # Collect slices in a list of Tensors
+#     all_slice_imgs = []
+#     for slice_idx in slices:
+#         slice_idx = min(slice_idx, D - 1)  # clamp in case slice_idx >= D
+#         slice_img = images[:, :, slice_idx, :, :]  # shape: (B, C, H, W)
+#         all_slice_imgs.append(slice_img)
+    
+#     # Concatenate along batch dimension => shape: (B * num_slices, C, H, W)
+#     slice_images = torch.cat(all_slice_imgs, dim=0)
+
+#     # Create a grid (Tensor) => shape: (3, grid_height, grid_width) or (1, ...)
+#     grid = torchvision.utils.make_grid(slice_images, **kwargs)
+
+#     # Convert the grid to a PIL image
+#     # grid shape is (C, H, W); move channel last => (H, W, C)
+#     ndarr = grid.permute(1, 2, 0).numpy()
+
+#     # If you used `normalize=True`, your range is [0, 1], so multiply by 255
+#     # Or if not normalized, you might need to clamp instead
+#     ndarr = (ndarr * 255).astype(np.uint8)
+    
+#     return Image.fromarray(ndarr)
+
+# class LogInputImagesCallback(Callback):
+#     """
+#     Logs input images to W&B during training at a given frequency.
+#     """
+
+#     def __init__(self, log_every_n_steps=500, max_images=4):
+#         """
+#         Args:
+#             log_every_n_steps (int): Frequency (in steps) to log images.
+#             max_images (int): How many images from the batch to log.
+#         """
+#         super().__init__()
+#         self.log_every_n_steps = log_every_n_steps
+#         self.max_images = max_images
+
+#     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+#         """
+#         This hook is called at the end of every training batch.
+#         We check if it's time to log, and if so, send a few images to W&B.
+#         """
+#         # Only log every `log_every_n_steps` steps
+#         global_step = trainer.global_step
+#         if global_step % self.log_every_n_steps == 0 and global_step > 0:
+#             # `batch` is typically a dict if you used a custom dataset; adjust as needed
+#             # Assuming your dataset __getitem__ returns {"data": tensor, "some_label": ...}
+#             images = batch["data"]  # shape: [B, C, H, W, ...] depending on your dataset
+#             subject_id = batch["subject_id"]
+#             images = images[: self.max_images]  # take a few images
+
+#             B, C, D, H, W = images.shape
+#             quarter_slice = max(D // 4, 0)
+#             middle_slice = max(D // 2, 0)
+#             three_quarter_slice = max((3 * D) // 4, 0)
+
+#             # Create a grid from these 3 slices
+#             grid_img = create_3d_image_grid(
+#                 images, 
+#                 slices=[quarter_slice, middle_slice, three_quarter_slice],
+#                 nrow=self.max_images, 
+#                 normalize=True,      # Example: turn on normalization
+#                 range=(0, 1),        # Example: scale intensities from [0,1]
+#                 pad_value=255        # Example: white padding
+#             )
+
+#             # Convert tensor to PIL image if needed
+#             if isinstance(grid_img, torch.Tensor):
+#                 grid_img = torchvision.transforms.ToPILImage()(grid_img)
+
+#             # Now log the PIL image to W&B
+#             trainer.logger.experiment.log({
+#                 f"3D_volume_slices_grid_{subject_id}": wandb.Image(grid_img, caption=f"Subject {subject_id}"),
+#                 "global_step": global_step
+#             })
 
 class EarlyStoppingAfter400Epochs(Callback):
     def __init__(self, patience=20, min_epochs=400):
